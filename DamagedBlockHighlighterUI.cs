@@ -1,8 +1,6 @@
 ﻿using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
-using UnityEngine.EventSystems;
-using UnityEngine.UI;
-using UnityEngine.Windows;
 
 namespace DamagedBlockHighlighter
 {
@@ -23,12 +21,24 @@ namespace DamagedBlockHighlighter
             }
         }
 
-        private GameObject highlightObject;
+        private Dictionary<Vector3i, GameObject> highlightObjects = new Dictionary<Vector3i, GameObject>();
         private Material highlightMaterial;
-        private Vector3i lastHighlightedBlock = Vector3i.zero;
+
+        [SerializeField] private float interval = 0.1f; // Check less frequently since we're doing more raycasts
+        [SerializeField] private float maxDistance = 20f;
+        [SerializeField] private int gridSize = 20; // Number of rays in each direction (20x20 = 400 rays)
+        [SerializeField] private float fieldOfView = 60f; // Field of view to scan
 
         private void Awake()
         {
+            if (instance != null && instance != this)
+            {
+                Destroy(this.gameObject);
+                return;
+            }
+            instance = this;
+            DontDestroyOnLoad(this.gameObject);
+
             // Create highlight material
             highlightMaterial = new Material(Shader.Find("Standard"));
             highlightMaterial.color = new Color(1f, 0f, 0f, 0.7f); // Red with transparency
@@ -42,54 +52,95 @@ namespace DamagedBlockHighlighter
             highlightMaterial.renderQueue = 3000;
         }
 
-        public void RaycastAndLogBlock()
+        public void ScanForDamagedBlocks()
         {
             EntityPlayerLocal player = GameManager.Instance?.World?.GetPrimaryPlayer();
             if (player == null)
                 return;
 
             Vector3 origin = player.getHeadPosition();
-            Vector3 direction = player.GetLookVector();
+            Vector3 forward = player.GetLookVector();
 
-            Ray ray = new Ray(origin, direction);
-            float maxDistance = 20f;
+            // Calculate camera's up and right vectors
+            Vector3 up = Vector3.up;
+            Vector3 right = Vector3.Cross(forward, up).normalized;
+            up = Vector3.Cross(right, forward).normalized;
 
-            //int hitMask = Voxel.HM_NotMoveable | Voxel.HM_Moveable | Voxel.HM_Transparent;
+            // Store found damaged blocks in this scan
+            HashSet<Vector3i> currentDamagedBlocks = new HashSet<Vector3i>();
+
             int hitMask = Voxel.HM_Melee;
 
-            if (Voxel.Raycast(GameManager.Instance.World, ray, maxDistance, hitMask, 0f))
+            // Cast rays in a grid pattern
+            float halfFOV = fieldOfView / 2f;
+
+            for (int x = 0; x < gridSize; x++)
             {
-                WorldRayHitInfo hit = Voxel.voxelRayHitInfo;
-                Vector3i blockPos = hit.hit.blockPos;
-                BlockValue blockValue = hit.hit.blockValue;
-                if (blockValue.damage > 0)
+                for (int y = 0; y < gridSize; y++)
                 {
-                    if (blockPos != lastHighlightedBlock)
+                    // Calculate the angle offset for this ray
+                    float horizontalAngle = Mathf.Lerp(-halfFOV, halfFOV, x / (float)(gridSize - 1));
+                    float verticalAngle = Mathf.Lerp(-halfFOV, halfFOV, y / (float)(gridSize - 1));
+
+                    // Create the ray direction
+                    Vector3 direction = forward;
+                    direction = Quaternion.AngleAxis(horizontalAngle, up) * direction;
+                    direction = Quaternion.AngleAxis(verticalAngle, right) * direction;
+                    direction.Normalize();
+
+                    Ray ray = new Ray(origin, direction);
+
+                    // Perform raycast
+                    if (Voxel.Raycast(GameManager.Instance.World, ray, maxDistance, hitMask, 0f))
                     {
-                        lastHighlightedBlock = blockPos;
-                        HighlightBlock(blockPos);
+                        WorldRayHitInfo hit = Voxel.voxelRayHitInfo;
+                        Vector3i blockPos = hit.hit.blockPos;
+                        BlockValue blockValue = hit.hit.blockValue;
+
+                        // Check if block is damaged
+                        if (blockValue.damage > 0)
+                        {
+                            currentDamagedBlocks.Add(blockPos);
+                        }
                     }
                 }
-                else
+            }
+
+            // Update highlights based on scan results
+            UpdateHighlights(currentDamagedBlocks);
+        }
+
+        private void UpdateHighlights(HashSet<Vector3i> damagedBlocks)
+        {
+            // Remove highlights for blocks that are no longer damaged or visible
+            List<Vector3i> toRemove = new List<Vector3i>();
+            foreach (var kvp in highlightObjects)
+            {
+                if (!damagedBlocks.Contains(kvp.Key))
                 {
-                    ClearHighlight();
-                    lastHighlightedBlock = Vector3i.zero;
+                    Destroy(kvp.Value);
+                    toRemove.Add(kvp.Key);
                 }
             }
-            else
+            foreach (var pos in toRemove)
             {
-                ClearHighlight();
-                lastHighlightedBlock = Vector3i.zero;
+                highlightObjects.Remove(pos);
+            }
+
+            // Add highlights for new damaged blocks
+            foreach (var blockPos in damagedBlocks)
+            {
+                if (!highlightObjects.ContainsKey(blockPos))
+                {
+                    HighlightBlock(blockPos);
+                }
             }
         }
 
         private void HighlightBlock(Vector3i blockPos)
         {
-            // Clear previous highlight
-            ClearHighlight();
-
             // Create a cube at the block position
-            highlightObject = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            GameObject highlightObject = GameObject.CreatePrimitive(PrimitiveType.Cube);
 
             // Remove the collider so it doesn't interfere with gameplay
             Collider collider = highlightObject.GetComponent<Collider>();
@@ -99,7 +150,6 @@ namespace DamagedBlockHighlighter
             }
 
             // Position the highlight (blocks are 1x1x1 units)
-            // Add 0.5 to center it on the block
             Vector3 worldPos = new Vector3(blockPos.x + 0.5f, blockPos.y + 0.5f, blockPos.z + 0.5f);
             highlightObject.transform.position = worldPos - Origin.position;
 
@@ -112,34 +162,44 @@ namespace DamagedBlockHighlighter
             {
                 renderer.material = highlightMaterial;
             }
+
+            // Store the highlight
+            highlightObjects[blockPos] = highlightObject;
         }
 
-        private void ClearHighlight()
+        private void ClearAllHighlights()
         {
-            if (highlightObject != null)
+            foreach (var kvp in highlightObjects)
             {
-                Destroy(highlightObject);
-                highlightObject = null;
+                if (kvp.Value != null)
+                {
+                    Destroy(kvp.Value);
+                }
             }
+            highlightObjects.Clear();
         }
-
-        [SerializeField] private float interval = 0.1f; // seconds
 
         private void OnEnable()
         {
-            StartCoroutine(FireEveryNSeconds());
+            StartCoroutine(ScanRoutine());
         }
 
         private void OnDisable()
         {
             StopAllCoroutines();
+            ClearAllHighlights();
         }
 
-        private IEnumerator FireEveryNSeconds()
+        private void OnDestroy()
+        {
+            ClearAllHighlights();
+        }
+
+        private IEnumerator ScanRoutine()
         {
             while (true)
             {
-                RaycastAndLogBlock();
+                ScanForDamagedBlocks();
                 yield return new WaitForSeconds(interval);
             }
         }
