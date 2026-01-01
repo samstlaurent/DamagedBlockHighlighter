@@ -31,7 +31,7 @@ namespace DamagedBlockHighlighter
         {
             // Create highlight material
             highlightMaterial = new Material(Shader.Find("Standard"));
-            highlightMaterial.color = new Color(1f, 0f, 0f, 0.3f); // Red with transparency
+            highlightMaterial.color = new Color(1f, 0f, 0f, 0.7f); // Red with transparency
             highlightMaterial.SetFloat("_Mode", 3); // Transparent rendering mode
             highlightMaterial.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
             highlightMaterial.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
@@ -61,15 +61,19 @@ namespace DamagedBlockHighlighter
             {
                 WorldRayHitInfo hit = Voxel.voxelRayHitInfo;
                 Vector3i blockPos = hit.hit.blockPos;
-
-                if (blockPos != lastHighlightedBlock)
+                BlockValue blockValue = hit.hit.blockValue;
+                if (blockValue.damage > 0)
                 {
-                    lastHighlightedBlock = blockPos;
-                    HighlightBlock(blockPos);
-                    
-                    BlockValue blockValue = hit.hit.blockValue;
-                    Log.Out($"[DamagedBlockHighlighter] Highlighting block at {blockPos}");
-                    Log.Out($"[DamagedBlockHighlighter] Block: {blockValue.Block.GetBlockName()}, Damage: {blockValue.damage}");
+                    if (blockPos != lastHighlightedBlock)
+                    {
+                        lastHighlightedBlock = blockPos;
+                        HighlightBlock(blockPos);
+                    }
+                }
+                else
+                {
+                    ClearHighlight();
+                    lastHighlightedBlock = Vector3i.zero;
                 }
             }
             else
