@@ -20,14 +20,10 @@ namespace DamagedBlockHighlighter
                 return instance;
             }
         }
-        
+
         private Dictionary<Vector3i, GameObject> highlightObjects = new Dictionary<Vector3i, GameObject>();
         private Material highlightMaterial;
-
-        [SerializeField] private float interval = 0.1f; // Check less frequently since we're doing more raycasts
-        [SerializeField] private float scanDistance = 20f;
-        [SerializeField] private float scanWidth = 20f;
-        [SerializeField] private float scanHeight = 20f;
+        private DamagedBlockHighlighterConfig config;
 
         private void Awake()
         {
@@ -39,9 +35,11 @@ namespace DamagedBlockHighlighter
             instance = this;
             DontDestroyOnLoad(this.gameObject);
 
+            config = ConfigLoader.Load();
+
             // Create highlight material
             highlightMaterial = new Material(Shader.Find("Transparent/Diffuse"));
-            highlightMaterial.color = new Color(1f, 0f, 0f, 0.2f);
+            highlightMaterial.color = config.HighlightColor;
         }
 
         public void ScanDamagedBlocksBox()
@@ -50,40 +48,44 @@ namespace DamagedBlockHighlighter
             if (player == null) return;
 
             // Only continue if the player is holding a repair tool
-            if (!IsHoldingRepairTool(player))
+            if (!IsHoldingRepairTool(player) && config.ScanOnlyWithRepairTool)
             {
-                // Clear all highlights if not holding repair tool
                 ClearAllHighlights();
                 return;
             }
 
-            Vector3 playerPos = player.getHeadPosition();
-            Vector3 forward = player.GetLookVector().normalized;
+            Camera cam = player.playerCamera;
+            if (cam == null) return;
 
             HashSet<Vector3i> currentDamagedBlocks = new HashSet<Vector3i>();
 
-            // Compute the center of the box in front of the player
-            Vector3 boxCenter = playerPos + forward * (scanDistance * 0.5f);
+            // Get frustum planes in Unity world space (accounting for Origin offset)
+            Plane[] frustumPlanes = GetClampedFrustumPlanes(cam, config.ScanRange);
 
-            // Half extents of the box (width, height, depth)
-            Vector3 halfExtents = new Vector3(scanWidth * 0.5f, scanHeight * 0.5f, scanDistance * 0.5f);
+            // Get iteration bounds based on camera frustum
+            GetIterationBounds(cam, config.ScanRange, out Vector3i min, out Vector3i max);
 
-            // Convert box bounds to voxel coordinates
-            int minX = Mathf.FloorToInt(boxCenter.x - halfExtents.x);
-            int maxX = Mathf.CeilToInt(boxCenter.x + halfExtents.x);
-            int minY = Mathf.FloorToInt(boxCenter.y - halfExtents.y);
-            int maxY = Mathf.CeilToInt(boxCenter.y + halfExtents.y);
-            int minZ = Mathf.FloorToInt(boxCenter.z - halfExtents.z);
-            int maxZ = Mathf.CeilToInt(boxCenter.z + halfExtents.z);
-
-            // Scan all blocks in the box
-            for (int x = minX; x <= maxX; x++)
+            // Scan all blocks in the bounding box
+            for (int x = min.x; x <= max.x; x++)
             {
-                for (int y = minY; y <= maxY; y++)
+                for (int y = min.y; y <= max.y; y++)
                 {
-                    for (int z = minZ; z <= maxZ; z++)
+                    for (int z = min.z; z <= max.z; z++)
                     {
                         Vector3i blockPos = new Vector3i(x, y, z);
+
+                        // Convert block position to Unity world space (with Origin offset)
+                        Vector3 blockWorldCenter = new Vector3(
+                            blockPos.x + 0.5f,
+                            blockPos.y + 0.5f,
+                            blockPos.z + 0.5f
+                        ) - Origin.position;
+
+                        // Check if block is in camera frustum
+                        if (!IsBlockInFrustum(frustumPlanes, blockWorldCenter))
+                            continue;
+
+                        // Check if block is damaged
                         BlockValue blockValue = GameManager.Instance.World.GetBlock(blockPos);
 
                         if (blockValue.damage > 0)
@@ -100,12 +102,10 @@ namespace DamagedBlockHighlighter
 
         private bool IsHoldingRepairTool(EntityPlayerLocal player)
         {
-            // Get the item the player is currently holding
             ItemValue holdingItem = player.inventory.holdingItemItemValue;
 
             if (holdingItem.IsEmpty()) return false;
 
-            // Get the item class
             ItemClass itemClass = holdingItem.ItemClass;
 
             if (itemClass == null) return false;
@@ -167,7 +167,7 @@ namespace DamagedBlockHighlighter
             highlightObject.transform.position = worldPos - Origin.position;
 
             // Make it slightly larger than the block to be visible
-            highlightObject.transform.localScale = new Vector3(1.02f, 1.02f, 1.02f);
+            highlightObject.transform.localScale = Vector3.one * config.HighlightScale;
 
             // Apply the highlight material
             Renderer renderer = highlightObject.GetComponent<Renderer>();
@@ -192,6 +192,84 @@ namespace DamagedBlockHighlighter
             highlightObjects.Clear();
         }
 
+        private Plane[] GetClampedFrustumPlanes(Camera cam, float maxDistance)
+        {
+            // Get standard frustum planes (these are in Unity world space)
+            Plane[] planes = GeometryUtility.CalculateFrustumPlanes(cam);
+
+            // Replace far plane with distance-clamped plane
+            Vector3 camPos = cam.transform.position;
+            Vector3 forward = cam.transform.forward;
+
+            // Create a near plane at the clamped distance
+            planes[5] = new Plane(-forward, camPos + forward * maxDistance);
+
+            return planes;
+        }
+
+        private void GetIterationBounds(Camera cam, float range, out Vector3i min, out Vector3i max)
+        {
+            // Camera position in Unity world space
+            Vector3 camPos = cam.transform.position;
+            Vector3 forward = cam.transform.forward;
+            Vector3 right = cam.transform.right;
+            Vector3 up = cam.transform.up;
+
+            // Calculate frustum dimensions at max range
+            float halfHeight = Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad) * range;
+            float halfWidth = halfHeight * cam.aspect;
+
+            // Calculate the 8 corners of the frustum at max range
+            Vector3 center = camPos + forward * range;
+            Vector3[] corners = new Vector3[8];
+
+            // Near plane corners (at camera)
+            corners[0] = camPos + up * halfHeight * 0.1f + right * halfWidth * 0.1f;
+            corners[1] = camPos + up * halfHeight * 0.1f - right * halfWidth * 0.1f;
+            corners[2] = camPos - up * halfHeight * 0.1f + right * halfWidth * 0.1f;
+            corners[3] = camPos - up * halfHeight * 0.1f - right * halfWidth * 0.1f;
+
+            // Far plane corners
+            corners[4] = center + up * halfHeight + right * halfWidth;
+            corners[5] = center + up * halfHeight - right * halfWidth;
+            corners[6] = center - up * halfHeight + right * halfWidth;
+            corners[7] = center - up * halfHeight - right * halfWidth;
+
+            // Find min/max across all corners, then convert to block coordinates
+            Vector3 minWorld = corners[0];
+            Vector3 maxWorld = corners[0];
+
+            for (int i = 1; i < 8; i++)
+            {
+                minWorld = Vector3.Min(minWorld, corners[i]);
+                maxWorld = Vector3.Max(maxWorld, corners[i]);
+            }
+
+            // Convert from Unity world space to block coordinates
+            // Add Origin.position back because block coordinates are in "world" space
+            minWorld += Origin.position;
+            maxWorld += Origin.position;
+
+            min = new Vector3i(
+                Mathf.FloorToInt(minWorld.x),
+                Mathf.FloorToInt(minWorld.y),
+                Mathf.FloorToInt(minWorld.z)
+            );
+
+            max = new Vector3i(
+                Mathf.CeilToInt(maxWorld.x),
+                Mathf.CeilToInt(maxWorld.y),
+                Mathf.CeilToInt(maxWorld.z)
+            );
+        }
+
+        private bool IsBlockInFrustum(Plane[] planes, Vector3 blockCenter)
+        {
+            // blockCenter is already in Unity world space (with Origin offset applied)
+            Bounds bounds = new Bounds(blockCenter, Vector3.one);
+            return GeometryUtility.TestPlanesAABB(planes, bounds);
+        }
+
         private void OnEnable()
         {
             StartCoroutine(ScanRoutine());
@@ -213,7 +291,7 @@ namespace DamagedBlockHighlighter
             while (true)
             {
                 ScanDamagedBlocksBox();
-                yield return new WaitForSeconds(interval);
+                yield return new WaitForSeconds(config.ScanInterval);
             }
         }
     }

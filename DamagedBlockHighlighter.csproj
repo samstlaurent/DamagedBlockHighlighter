@@ -69,6 +69,7 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="ConfigLoader.cs" />
     <Compile Include="DamagedBlockHighlighter.cs" />
     <Compile Include="DamagedBlockHighlighterUI.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
