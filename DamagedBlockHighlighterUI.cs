@@ -20,14 +20,14 @@ namespace DamagedBlockHighlighter
                 return instance;
             }
         }
-
+        
         private Dictionary<Vector3i, GameObject> highlightObjects = new Dictionary<Vector3i, GameObject>();
         private Material highlightMaterial;
 
         [SerializeField] private float interval = 0.1f; // Check less frequently since we're doing more raycasts
-        [SerializeField] private float maxDistance = 20f;
-        [SerializeField] private int gridSize = 20; // Number of rays in each direction (20x20 = 400 rays)
-        [SerializeField] private float fieldOfView = 60f; // Field of view to scan
+        [SerializeField] private float scanDistance = 20f;
+        [SerializeField] private float scanWidth = 20f;
+        [SerializeField] private float scanHeight = 20f;
 
         private void Awake()
         {
@@ -40,64 +40,44 @@ namespace DamagedBlockHighlighter
             DontDestroyOnLoad(this.gameObject);
 
             // Create highlight material
-            highlightMaterial = new Material(Shader.Find("Standard"));
-            highlightMaterial.color = new Color(1f, 0f, 0f, 0.7f); // Red with transparency
-            highlightMaterial.SetFloat("_Mode", 3); // Transparent rendering mode
-            highlightMaterial.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
-            highlightMaterial.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
-            highlightMaterial.SetInt("_ZWrite", 0);
-            highlightMaterial.DisableKeyword("_ALPHATEST_ON");
-            highlightMaterial.EnableKeyword("_ALPHABLEND_ON");
-            highlightMaterial.DisableKeyword("_ALPHAPREMULTIPLY_ON");
-            highlightMaterial.renderQueue = 3000;
+            highlightMaterial = new Material(Shader.Find("Transparent/Diffuse"));
+            highlightMaterial.color = new Color(1f, 0f, 0f, 0.2f);
         }
 
-        public void ScanForDamagedBlocks()
+        public void ScanDamagedBlocksBox()
         {
             EntityPlayerLocal player = GameManager.Instance?.World?.GetPrimaryPlayer();
-            if (player == null)
-                return;
+            if (player == null) return;
 
-            Vector3 origin = player.getHeadPosition();
-            Vector3 forward = player.GetLookVector();
+            Vector3 playerPos = player.getHeadPosition();
+            Vector3 forward = player.GetLookVector().normalized;
 
-            // Calculate camera's up and right vectors
-            Vector3 up = Vector3.up;
-            Vector3 right = Vector3.Cross(forward, up).normalized;
-            up = Vector3.Cross(right, forward).normalized;
-
-            // Store found damaged blocks in this scan
             HashSet<Vector3i> currentDamagedBlocks = new HashSet<Vector3i>();
 
-            int hitMask = Voxel.HM_Melee;
+            // Compute the center of the box in front of the player
+            Vector3 boxCenter = playerPos + forward * (scanDistance * 0.5f);
 
-            // Cast rays in a grid pattern
-            float halfFOV = fieldOfView / 2f;
+            // Half extents of the box (width, height, depth)
+            Vector3 halfExtents = new Vector3(scanWidth * 0.5f, scanHeight * 0.5f, scanDistance * 0.5f);
 
-            for (int x = 0; x < gridSize; x++)
+            // Convert box bounds to voxel coordinates
+            int minX = Mathf.FloorToInt(boxCenter.x - halfExtents.x);
+            int maxX = Mathf.CeilToInt(boxCenter.x + halfExtents.x);
+            int minY = Mathf.FloorToInt(boxCenter.y - halfExtents.y);
+            int maxY = Mathf.CeilToInt(boxCenter.y + halfExtents.y);
+            int minZ = Mathf.FloorToInt(boxCenter.z - halfExtents.z);
+            int maxZ = Mathf.CeilToInt(boxCenter.z + halfExtents.z);
+
+            // Scan all blocks in the box
+            for (int x = minX; x <= maxX; x++)
             {
-                for (int y = 0; y < gridSize; y++)
+                for (int y = minY; y <= maxY; y++)
                 {
-                    // Calculate the angle offset for this ray
-                    float horizontalAngle = Mathf.Lerp(-halfFOV, halfFOV, x / (float)(gridSize - 1));
-                    float verticalAngle = Mathf.Lerp(-halfFOV, halfFOV, y / (float)(gridSize - 1));
-
-                    // Create the ray direction
-                    Vector3 direction = forward;
-                    direction = Quaternion.AngleAxis(horizontalAngle, up) * direction;
-                    direction = Quaternion.AngleAxis(verticalAngle, right) * direction;
-                    direction.Normalize();
-
-                    Ray ray = new Ray(origin, direction);
-
-                    // Perform raycast
-                    if (Voxel.Raycast(GameManager.Instance.World, ray, maxDistance, hitMask, 0f))
+                    for (int z = minZ; z <= maxZ; z++)
                     {
-                        WorldRayHitInfo hit = Voxel.voxelRayHitInfo;
-                        Vector3i blockPos = hit.hit.blockPos;
-                        BlockValue blockValue = hit.hit.blockValue;
+                        Vector3i blockPos = new Vector3i(x, y, z);
+                        BlockValue blockValue = GameManager.Instance.World.GetBlock(blockPos);
 
-                        // Check if block is damaged
                         if (blockValue.damage > 0)
                         {
                             currentDamagedBlocks.Add(blockPos);
@@ -106,7 +86,7 @@ namespace DamagedBlockHighlighter
                 }
             }
 
-            // Update highlights based on scan results
+            // Update the highlights
             UpdateHighlights(currentDamagedBlocks);
         }
 
@@ -199,7 +179,7 @@ namespace DamagedBlockHighlighter
         {
             while (true)
             {
-                ScanForDamagedBlocks();
+                ScanDamagedBlocksBox();
                 yield return new WaitForSeconds(interval);
             }
         }
