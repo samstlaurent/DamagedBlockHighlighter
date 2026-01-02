@@ -49,6 +49,14 @@ namespace DamagedBlockHighlighter
             EntityPlayerLocal player = GameManager.Instance?.World?.GetPrimaryPlayer();
             if (player == null) return;
 
+            // Only continue if the player is holding a repair tool
+            if (!IsHoldingRepairTool(player))
+            {
+                // Clear all highlights if not holding repair tool
+                ClearAllHighlights();
+                return;
+            }
+
             Vector3 playerPos = player.getHeadPosition();
             Vector3 forward = player.GetLookVector().normalized;
 
@@ -88,6 +96,31 @@ namespace DamagedBlockHighlighter
 
             // Update the highlights
             UpdateHighlights(currentDamagedBlocks);
+        }
+
+        private bool IsHoldingRepairTool(EntityPlayerLocal player)
+        {
+            // Get the item the player is currently holding
+            ItemValue holdingItem = player.inventory.holdingItemItemValue;
+
+            if (holdingItem.IsEmpty()) return false;
+
+            // Get the item class
+            ItemClass itemClass = holdingItem.ItemClass;
+
+            if (itemClass == null) return false;
+
+            // Check if tool has RepairAction
+            ItemAction[] actions = itemClass.Actions;
+            if (actions != null)
+            {
+                foreach (ItemAction action in actions)
+                {
+                    if (action is ItemActionRepair) return true;
+                }
+            }
+
+            return false;
         }
 
         private void UpdateHighlights(HashSet<Vector3i> damagedBlocks)
