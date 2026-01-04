@@ -7,9 +7,11 @@ namespace DamagedBlockHighlighter
     // Holds config values only
     public class DamagedBlockHighlighterConfig
     {
-        public float ScanInterval = 0.2f;
-        public float ScanRange = 15f;
+        public float ScanInterval = 0.2f; // seconds
+        public float ScanRange = 15f; // meters
         public bool ScanOnlyWithRepairTool = true;
+        public bool ScanIgnoreTerrain = false;
+        public float ScanDamageThreshold = 0.05f; // proportion of damage (0-1)
 
         public Color HighlightColor = new Color(1f, 0f, 1f, 0.5f);
         public float HighlightScale = 1.01f;
@@ -41,8 +43,9 @@ namespace DamagedBlockHighlighter
                 var scan = root["Scan"];
                 config.ScanInterval = float.Parse(scan["Interval"].InnerText);
                 config.ScanRange = float.Parse(scan["Range"].InnerText);
-                config.ScanOnlyWithRepairTool =
-                    bool.Parse(scan["OnlyWithRepairTool"].InnerText);
+                config.ScanOnlyWithRepairTool = bool.Parse(scan["OnlyWithRepairTool"].InnerText);
+                config.ScanIgnoreTerrain = bool.Parse(scan["IgnoreTerrain"].InnerText);
+                config.ScanDamageThreshold = float.Parse(scan["DamageThreshold"].InnerText);
 
                 var colorNode = root["Highlight"]["Color"];
                 config.HighlightColor = new Color(

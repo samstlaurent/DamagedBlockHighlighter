@@ -24,6 +24,7 @@ namespace DamagedBlockHighlighter
         private Dictionary<Vector3i, GameObject> highlightObjects = new Dictionary<Vector3i, GameObject>();
         private Material highlightMaterial;
         private DamagedBlockHighlighterConfig config;
+        private HashSet<int> repairToolItemIds = new HashSet<int>();
 
         private void Awake()
         {
@@ -40,6 +41,22 @@ namespace DamagedBlockHighlighter
             // Create highlight material
             highlightMaterial = new Material(Shader.Find("Transparent/Diffuse"));
             highlightMaterial.color = config.HighlightColor;
+
+            // Generate list of repair tool IDs
+            repairToolItemIds.Clear();
+            for (int i = 0; i < ItemClass.list.Length; i++)
+            {
+                ItemClass itemClass = ItemClass.list[i];
+                if (itemClass == null || itemClass.Actions == null) continue;
+                foreach (ItemAction action in itemClass.Actions)
+                {
+                    if (action is ItemActionRepair) // Check if this item has a RepairAction
+                    {
+                        repairToolItemIds.Add(itemClass.Id);
+                        break;
+                    }
+                }
+            }
         }
 
         public void ScanDamagedBlocksBox()
@@ -82,16 +99,18 @@ namespace DamagedBlockHighlighter
                         ) - Origin.position;
 
                         // Check if block is in camera frustum
-                        if (!IsBlockInFrustum(frustumPlanes, blockWorldCenter))
-                            continue;
+                        if (!IsBlockInFrustum(frustumPlanes, blockWorldCenter)) continue;
 
-                        // Check if block is damaged
+                        // Check if block damage exceeds threshold
                         BlockValue blockValue = GameManager.Instance.World.GetBlock(blockPos);
+                        int maxDamage = blockValue.Block.MaxDamage;
+                        float damagePercent = (float)blockValue.damage / maxDamage;
+                        if (damagePercent < config.ScanDamageThreshold) continue;
 
-                        if (blockValue.damage > 0)
-                        {
-                            currentDamagedBlocks.Add(blockPos);
-                        }
+                        // Check if terrain blocks should be ignored
+                        if (config.ScanIgnoreTerrain && blockValue.Block.shape.IsTerrain()) continue;
+
+                        currentDamagedBlocks.Add(blockPos);
                     }
                 }
             }
@@ -103,24 +122,8 @@ namespace DamagedBlockHighlighter
         private bool IsHoldingRepairTool(EntityPlayerLocal player)
         {
             ItemValue holdingItem = player.inventory.holdingItemItemValue;
-
             if (holdingItem.IsEmpty()) return false;
-
-            ItemClass itemClass = holdingItem.ItemClass;
-
-            if (itemClass == null) return false;
-
-            // Check if tool has RepairAction
-            ItemAction[] actions = itemClass.Actions;
-            if (actions != null)
-            {
-                foreach (ItemAction action in actions)
-                {
-                    if (action is ItemActionRepair) return true;
-                }
-            }
-
-            return false;
+            return repairToolItemIds.Contains(holdingItem.type);
         }
 
         private void UpdateHighlights(HashSet<Vector3i> damagedBlocks)
