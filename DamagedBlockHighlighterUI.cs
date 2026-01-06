@@ -1,6 +1,7 @@
 ﻿using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using XMLEditing;
 
 namespace DamagedBlockHighlighter
 {
@@ -22,9 +23,9 @@ namespace DamagedBlockHighlighter
         }
 
         private Dictionary<Vector3i, GameObject> highlightObjects = new Dictionary<Vector3i, GameObject>();
+        private Dictionary<(int blockType, byte meta), Mesh> meshCache = new Dictionary<(int, byte), Mesh>();
         private Material highlightMaterial;
         private DamagedBlockHighlighterConfig config;
-        private HashSet<int> repairToolItemIds = new HashSet<int>();
 
         private void Awake()
         {
@@ -41,21 +42,37 @@ namespace DamagedBlockHighlighter
             // Create highlight material
             highlightMaterial = new Material(Shader.Find("Transparent/Diffuse"));
             highlightMaterial.color = config.HighlightColor;
+            highlightMaterial.renderQueue = 3001;
+            highlightMaterial.SetInt("_ZTest", (int)UnityEngine.Rendering.CompareFunction.Always);
+        }
 
-            // Generate list of repair tool IDs
-            repairToolItemIds.Clear();
-            for (int i = 0; i < ItemClass.list.Length; i++)
+        private void OnEnable()
+        {
+            StartCoroutine(ScanRoutine());
+        }
+
+        private void OnDisable()
+        {
+            StopAllCoroutines();
+            ClearAllHighlights();
+        }
+
+        private void OnDestroy()
+        {
+            ClearAllHighlights();
+            foreach (var cachedMesh in meshCache.Values)
             {
-                ItemClass itemClass = ItemClass.list[i];
-                if (itemClass == null || itemClass.Actions == null) continue;
-                foreach (ItemAction action in itemClass.Actions)
-                {
-                    if (action is ItemActionRepair) // Check if this item has a RepairAction
-                    {
-                        repairToolItemIds.Add(itemClass.Id);
-                        break;
-                    }
-                }
+                if (cachedMesh != null) Destroy(cachedMesh);
+            }
+            meshCache.Clear();
+        }
+
+        private IEnumerator ScanRoutine()
+        {
+            while (true)
+            {
+                ScanDamagedBlocksBox();
+                yield return new WaitForSeconds(config.ScanInterval);
             }
         }
 
@@ -105,7 +122,7 @@ namespace DamagedBlockHighlighter
                         BlockValue blockValue = GameManager.Instance.World.GetBlock(blockPos);
                         int maxDamage = blockValue.Block.MaxDamage;
                         float damagePercent = (float)blockValue.damage / maxDamage;
-                        if (damagePercent < config.ScanDamageThreshold) continue;
+                        if (damagePercent <= config.ScanDamageThreshold) continue;
 
                         // Check if terrain blocks should be ignored
                         if (config.ScanIgnoreTerrain && blockValue.Block.shape.IsTerrain()) continue;
@@ -123,7 +140,33 @@ namespace DamagedBlockHighlighter
         {
             ItemValue holdingItem = player.inventory.holdingItemItemValue;
             if (holdingItem.IsEmpty()) return false;
-            return repairToolItemIds.Contains(holdingItem.type);
+
+            ItemClass itemClass = holdingItem.ItemClass;
+            if (itemClass == null) return false;
+
+            // Check if tool has RepairAction
+            ItemAction[] actions = itemClass.Actions;
+            if (actions != null)
+            {
+                foreach (ItemAction action in actions)
+                {
+                    if (action is ItemActionRepair) return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void ClearAllHighlights()
+        {
+            foreach (var kvp in highlightObjects)
+            {
+                if (kvp.Value != null)
+                {
+                    Destroy(kvp.Value);
+                }
+            }
+            highlightObjects.Clear();
         }
 
         private void UpdateHighlights(HashSet<Vector3i> damagedBlocks)
@@ -155,59 +198,149 @@ namespace DamagedBlockHighlighter
 
         private void HighlightBlock(Vector3i blockPos)
         {
-            // Create a cube at the block position
-            GameObject highlightObject = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            BlockValue blockValue = GameManager.Instance.World.GetBlock(blockPos);
+            if (blockValue.isair) return;
+            var cacheKey = (blockValue.type, blockValue.meta);
 
-            // Remove the collider so it doesn't interfere with gameplay
-            Collider collider = highlightObject.GetComponent<Collider>();
-            if (collider != null)
+            GameObject highlightObject = new GameObject("BlockHighlight_" + blockPos);
+            MeshFilter meshFilter = highlightObject.AddComponent<MeshFilter>();
+            MeshRenderer meshRenderer = highlightObject.AddComponent<MeshRenderer>();
+            meshRenderer.material = highlightMaterial;
+            meshRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            meshRenderer.receiveShadows = false;
+
+            Vector3 worldPos = new Vector3(blockPos.x + 0.5f, blockPos.y + 0.5f, blockPos.z + 0.5f) - Origin.position; // Position at block center (Unity world space)
+            highlightObject.transform.position = worldPos;
+            highlightObject.transform.rotation = blockValue.Block.shape.GetRotation(blockValue); // Apply block rotation
+            if (!meshCache.TryGetValue(cacheKey, out Mesh mesh)) // Get cached or generate mesh
             {
-                Destroy(collider);
+                mesh = GetBlockMesh(blockValue);
+                if (mesh != null) meshCache[cacheKey] = mesh;
+                else mesh = GetCubeMesh(); // Fallback to cube if mesh gen fails
             }
-
-            // Position the highlight (blocks are 1x1x1 units)
-            Vector3 worldPos = new Vector3(blockPos.x + 0.5f, blockPos.y + 0.5f, blockPos.z + 0.5f);
-            highlightObject.transform.position = worldPos - Origin.position;
-
-            // Make it slightly larger than the block to be visible
-            highlightObject.transform.localScale = Vector3.one * config.HighlightScale;
-
-            // Apply the highlight material
-            Renderer renderer = highlightObject.GetComponent<Renderer>();
-            if (renderer != null)
-            {
-                renderer.material = highlightMaterial;
-            }
-
-            // Store the highlight
+            meshFilter.mesh = mesh;
             highlightObjects[blockPos] = highlightObject;
         }
 
-        private void ClearAllHighlights()
+        private Mesh GetBlockMesh(BlockValue blockValue)
         {
-            foreach (var kvp in highlightObjects)
+            try
             {
-                if (kvp.Value != null)
+                Block block = blockValue.Block;
+                BlockShape shape = block.shape;
+
+                if (shape is BlockShapeNew bsn)
                 {
-                    Destroy(kvp.Value);
+                    Mesh mesh = new Mesh();
+                    mesh.Clear();
+                    List<Vector3> verts = new List<Vector3>();
+                    List<Vector3> norms = new List<Vector3>();
+                    List<int> tris = new List<int>(); // Use int[] for SetTriangles
+
+                    for (int f = 0; f < 7; f++) // Combine all visual meshes (faces 0-6)
+                    {
+                        BlockShapeNew.MySimpleMesh sm = bsn.visualMeshes[f];
+                        if (sm == null) continue;
+                        int offset = verts.Count;
+                        verts.AddRange(sm.Vertices);
+                        norms.AddRange(sm.Normals);
+                        foreach (ushort idx in sm.Indices) tris.Add(offset + idx); // Convert ushort indices to int and offset
+                    }
+
+                    if (verts.Count == 0) // If no visuals, try colliders
+                    {
+                        for (int f = 0; f < 7; f++)
+                        {
+                            BlockShapeNew.MySimpleMesh sm = bsn.colliderMeshes[f];
+                            if (sm == null) continue;
+                            int offset = verts.Count;
+                            verts.AddRange(sm.Vertices);
+                            norms.AddRange(sm.Normals);
+                            foreach (ushort idx in sm.Indices) tris.Add(offset + idx);
+                        }
+                    }
+
+                    Vector3 offsetVec = new Vector3(0.5f, 0.5f, 0.5f); // Center the vertices by subtracting 0.5 in x, y and z
+                    for (int i = 0; i < verts.Count; i++) verts[i] -= offsetVec;
+
+                    mesh.SetVertices(verts);
+                    mesh.SetNormals(norms);
+                    mesh.SetTriangles(tris, 0); // submesh 0
+                    mesh.RecalculateBounds();
+                    mesh.MarkDynamic(); // Optional for performance
+
+                    if (mesh != null && mesh.vertices.Length > 0)
+                    {
+                        Vector3[] vertices = mesh.vertices;
+                        Vector3[] normals = mesh.normals;
+                        for (int i = 0; i < vertices.Length; i++) vertices[i] += normals[i] * 0.001f; // Small offset to push highlight outside
+                        mesh.vertices = vertices;
+                        mesh.RecalculateBounds();
+                    }
+
+                    return mesh;
                 }
+                else return null;
             }
-            highlightObjects.Clear();
+            catch (System.Exception ex)
+            {
+                Debug.LogError("Error generating block mesh: " + ex.Message);
+                return null;
+            }
+        }
+
+        //private Mesh GetModelBlockProxyMesh(BlockValue blockValue)
+        //{
+        //    Block block = blockValue.Block;
+
+        //    // Use block bounds if available
+        //    Vector3 size = Vector3.one;
+
+        //    if (block is BlockModel bm)
+        //    {
+        //        size = bm.GetModelBounds().size;
+        //    }
+
+        //    Mesh cube = GetCubeMesh();
+
+        //    Vector3[] verts = cube.vertices;
+        //    for (int i = 0; i < verts.Length; i++)
+        //    {
+        //        verts[i] = Vector3.Scale(verts[i], size);
+        //    }
+
+        //    cube.vertices = verts;
+        //    cube.RecalculateBounds();
+
+        //    return cube;
+        //}
+
+        private Mesh GetCubeMesh()
+        {
+            GameObject tempCube = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            Mesh cubeMesh = Instantiate(tempCube.GetComponent<MeshFilter>().sharedMesh); // Instantiate to own it
+            DestroyImmediate(tempCube);
+            Vector3[] vertices = cubeMesh.vertices;
+            for (int i = 0; i < vertices.Length; i++) vertices[i] *= 1.001f; // Scale the cube slightly to avoid z-fighting
+            cubeMesh.vertices = vertices;
+            cubeMesh.RecalculateBounds();
+            return cubeMesh;
         }
 
         private Plane[] GetClampedFrustumPlanes(Camera cam, float maxDistance)
         {
-            // Get standard frustum planes (these are in Unity world space)
-            Plane[] planes = GeometryUtility.CalculateFrustumPlanes(cam);
-
-            // Replace far plane with distance-clamped plane
-            Vector3 camPos = cam.transform.position;
+            Plane[] planes = GeometryUtility.CalculateFrustumPlanes(cam); // Get standard frustum planes (these are in Unity world space)
+            Vector3 camPos = cam.transform.position; // Replace far plane with distance-clamped plane
             Vector3 forward = cam.transform.forward;
-
-            // Create a near plane at the clamped distance
-            planes[5] = new Plane(-forward, camPos + forward * maxDistance);
-
+            planes[5] = new Plane(-forward, camPos + forward * maxDistance); // Create a near plane at the clamped distance
             return planes;
+        }
+
+        private bool IsBlockInFrustum(Plane[] planes, Vector3 blockCenter)
+        {
+            // blockCenter is already in Unity world space (with Origin offset applied)
+            Bounds bounds = new Bounds(blockCenter, Vector3.one);
+            return GeometryUtility.TestPlanesAABB(planes, bounds);
         }
 
         private void GetIterationBounds(Camera cam, float range, out Vector3i min, out Vector3i max)
@@ -264,38 +397,6 @@ namespace DamagedBlockHighlighter
                 Mathf.CeilToInt(maxWorld.y),
                 Mathf.CeilToInt(maxWorld.z)
             );
-        }
-
-        private bool IsBlockInFrustum(Plane[] planes, Vector3 blockCenter)
-        {
-            // blockCenter is already in Unity world space (with Origin offset applied)
-            Bounds bounds = new Bounds(blockCenter, Vector3.one);
-            return GeometryUtility.TestPlanesAABB(planes, bounds);
-        }
-
-        private void OnEnable()
-        {
-            StartCoroutine(ScanRoutine());
-        }
-
-        private void OnDisable()
-        {
-            StopAllCoroutines();
-            ClearAllHighlights();
-        }
-
-        private void OnDestroy()
-        {
-            ClearAllHighlights();
-        }
-
-        private IEnumerator ScanRoutine()
-        {
-            while (true)
-            {
-                ScanDamagedBlocksBox();
-                yield return new WaitForSeconds(config.ScanInterval);
-            }
         }
     }
 }
