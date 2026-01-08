@@ -214,73 +214,57 @@ namespace DamagedBlockHighlighter
             highlightObject.transform.rotation = blockValue.Block.shape.GetRotation(blockValue); // Apply block rotation
             if (!meshCache.TryGetValue(cacheKey, out Mesh mesh)) // Get cached or generate mesh
             {
-                mesh = GetBlockMesh(blockValue);
+                Block block = blockValue.Block;
+                BlockShape shape = block.shape;
+
+                if (shape is BlockShapeNew bsn) mesh = GetMesh_BlockShapeNew(bsn);
+
                 if (mesh != null) meshCache[cacheKey] = mesh;
-                else mesh = GetCubeMesh(); // Fallback to cube if mesh gen fails
+                else mesh = GetMesh_Cube(); // Fallback to cube if mesh gen fails
             }
             meshFilter.mesh = mesh;
             highlightObjects[blockPos] = highlightObject;
         }
 
-        private Mesh GetBlockMesh(BlockValue blockValue)
+        private Mesh GetMesh_BlockShapeNew(BlockShapeNew bsn)
         {
             try
             {
-                Block block = blockValue.Block;
-                BlockShape shape = block.shape;
+                Mesh mesh = new Mesh();
+                mesh.Clear();
+                List<Vector3> verts = new List<Vector3>();
+                List<Vector3> norms = new List<Vector3>();
+                List<int> tris = new List<int>();
 
-                if (shape is BlockShapeNew bsn)
+                for (int f = 0; f < 7; f++) // Combine all visual meshes (faces 0-6)
                 {
-                    Mesh mesh = new Mesh();
-                    mesh.Clear();
-                    List<Vector3> verts = new List<Vector3>();
-                    List<Vector3> norms = new List<Vector3>();
-                    List<int> tris = new List<int>(); // Use int[] for SetTriangles
-
-                    for (int f = 0; f < 7; f++) // Combine all visual meshes (faces 0-6)
-                    {
-                        BlockShapeNew.MySimpleMesh sm = bsn.visualMeshes[f];
-                        if (sm == null) continue;
-                        int offset = verts.Count;
-                        verts.AddRange(sm.Vertices);
-                        norms.AddRange(sm.Normals);
-                        foreach (ushort idx in sm.Indices) tris.Add(offset + idx); // Convert ushort indices to int and offset
-                    }
-
-                    if (verts.Count == 0) // If no visuals, try colliders
-                    {
-                        for (int f = 0; f < 7; f++)
-                        {
-                            BlockShapeNew.MySimpleMesh sm = bsn.colliderMeshes[f];
-                            if (sm == null) continue;
-                            int offset = verts.Count;
-                            verts.AddRange(sm.Vertices);
-                            norms.AddRange(sm.Normals);
-                            foreach (ushort idx in sm.Indices) tris.Add(offset + idx);
-                        }
-                    }
-
-                    Vector3 offsetVec = new Vector3(0.5f, 0.5f, 0.5f); // Center the vertices by subtracting 0.5 in x, y and z
-                    for (int i = 0; i < verts.Count; i++) verts[i] -= offsetVec;
-
-                    mesh.SetVertices(verts);
-                    mesh.SetNormals(norms);
-                    mesh.SetTriangles(tris, 0); // submesh 0
-                    mesh.RecalculateBounds();
-                    mesh.MarkDynamic(); // Optional for performance
-
-                    if (mesh != null && mesh.vertices.Length > 0)
-                    {
-                        Vector3[] vertices = mesh.vertices;
-                        Vector3[] normals = mesh.normals;
-                        for (int i = 0; i < vertices.Length; i++) vertices[i] += normals[i] * 0.001f; // Small offset to push highlight outside
-                        mesh.vertices = vertices;
-                        mesh.RecalculateBounds();
-                    }
-
-                    return mesh;
+                    BlockShapeNew.MySimpleMesh sm = bsn.visualMeshes[f];
+                    if (sm == null) continue;
+                    int offset = verts.Count;
+                    verts.AddRange(sm.Vertices);
+                    norms.AddRange(sm.Normals);
+                    foreach (ushort idx in sm.Indices) tris.Add(offset + idx); // Convert ushort indices to int and offset
                 }
-                else return null;
+
+                Vector3 offsetVec = new Vector3(0.5f, 0.5f, 0.5f); // Center the vertices by subtracting 0.5 in x, y and z
+                for (int i = 0; i < verts.Count; i++) verts[i] -= offsetVec;
+
+                mesh.SetVertices(verts);
+                mesh.SetNormals(norms);
+                mesh.SetTriangles(tris, 0);
+                mesh.RecalculateBounds();
+                mesh.MarkDynamic();
+
+                if (mesh != null && mesh.vertices.Length > 0)
+                {
+                    Vector3[] vertices = mesh.vertices;
+                    Vector3[] normals = mesh.normals;
+                    for (int i = 0; i < vertices.Length; i++) vertices[i] += normals[i] * 0.001f; // Small offset to push highlight outside of mesh
+                    mesh.vertices = vertices;
+                    mesh.RecalculateBounds();
+                }
+
+                return mesh;
             }
             catch (System.Exception ex)
             {
@@ -315,7 +299,7 @@ namespace DamagedBlockHighlighter
         //    return cube;
         //}
 
-        private Mesh GetCubeMesh()
+        private Mesh GetMesh_Cube()
         {
             GameObject tempCube = GameObject.CreatePrimitive(PrimitiveType.Cube);
             Mesh cubeMesh = Instantiate(tempCube.GetComponent<MeshFilter>().sharedMesh); // Instantiate to own it
